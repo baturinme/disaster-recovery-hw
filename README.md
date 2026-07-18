@@ -1,86 +1,105 @@
-# Домашнее задание к занятию 2 «Кластеризация и балансировка нагрузки»
+# Домашнее задание к занятию «Отказоустойчивость в облаке»
 
-## Задание 1
+### Terraform Playbook
 
-### Перенаправление запросов на разные серверы
+```
+terraform {
+  required_providers {
+    yandex = {
+      source = "yandex-cloud/yandex"
+    }
+  }
+}
+
+provider "yandex" {
+  zone                    = "ru-central1-b"
+  folder_id               = "b1gd9ks1b4l1719uds1t"
+  service_account_key_file = "key.json"
+}
+
+resource "yandex_vpc_network" "network1" {
+  name = "network1"
+}
+
+resource "yandex_vpc_subnet" "subnet1" {
+  name           = "subnet1"
+  zone           = "ru-central1-b"
+  network_id     = yandex_vpc_network.network1.id
+  v4_cidr_blocks = ["172.24.8.0/24"]
+}
+
+resource "yandex_compute_instance" "vm" {
+  count = 2
+  name = "nginx-vm-${count.index}"
+  platform_id = "standard-v1"
+  resources {
+    cores  = 2
+    memory = 2
+  }
+  boot_disk {
+    initialize_params {
+      image_id = "fd83ica41cade1mj35sr"
+    }
+  }
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet1.id
+    nat       = true
+  }
+  metadata = {
+    ssh-keys = "ubuntu:${file("~/.ssh/id_ed25519.pub")}"
+    user-data = <<-EOF
+      #cloud-config
+      packages:
+        - nginx
+      runcmd:
+        - systemctl enable nginx
+        - systemctl start nginx
+    EOF
+  }
+}
+
+resource "yandex_lb_target_group" "group1" {
+  name = "nginx-target-group"
+  dynamic "target" {
+    for_each = yandex_compute_instance.vm
+    content {
+      subnet_id = yandex_vpc_subnet.subnet1.id
+      address = target.value.network_interface[0].ip_address
+    }
+  }
+}
+
+resource "yandex_lb_network_load_balancer" "balancer1" {
+  name = "nginx-load-balancer"
+  listener {
+    name = "http"
+    port = 80
+    external_address_spec {
+      ip_version = "ipv4"
+    }
+  }
+  attached_target_group {
+    target_group_id = yandex_lb_target_group.group1.id
+    healthcheck {
+      name = "http-healthcheck"
+      http_options {
+        port = 80
+        path = "/"
+      }
+    }
+  }
+}
+```
+
+### Скриншот статуса балансировщика
+
 ![Скриншот 1](img/img1.png)
 
-
-### Конфигурационный файл HAProxy
-
-```
-global
-    daemon
-
-defaults
-    mode tcp
-    timeout connect 5s
-    timeout client 50s
-    timeout server 50s
-
-
-frontend tcp_front
-    bind *:8088
-    default_backend tcp_servers
-
-
-backend tcp_servers
-    balance roundrobin
-
-    server s1 127.0.0.1:8888 check
-    server s2 127.0.0.1:9999 check
-```
-
-## Задание 2
-
-### Три simple python сервера на разных портах
+### Скриншот статуса целевой группы
 
 ![Скриншот 2](img/img2.png)
 
-### Конфигурационный файл HAProxy
-
-```
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
-    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
-    stats timeout 30s
-    user haproxy
-    group haproxy
-    daemon
-
-defaults
-    log global
-    mode http
-    option httplog
-    option dontlognull
-    timeout connect 5s
-    timeout client 50s
-    timeout server 50s
-
-frontend http_front
-    bind *:8088
-    mode http
-
-    acl is_example hdr_dom(host) -i example.local
-
-    use_backend servers_weights if is_example
-    default_backend no_access
-
-backend servers_weights
-    mode http
-    balance roundrobin
-
-    server server1 127.0.0.1:8888 weight 2 check
-    server server2 127.0.0.1:9999 weight 3 check
-    server server3 127.0.0.1:8899 weight 4 check
-
-backend no_access
-    mode http
-    http-request deny deny_status 403
-```
-
-### Перенаправление запросов на разные серверы при обращении к HAProxy c использованием домена example.local и без него
+### Скриншот страницы, которая открылась при запросе IP-адреса балансировщика.
 
 ![Скриншот 3](img/img3.png)
+
